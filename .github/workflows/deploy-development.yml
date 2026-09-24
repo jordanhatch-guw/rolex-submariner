@@ -1,0 +1,92 @@
+# Deploys the development branch to your -dev site.
+# Runs whenever something is pushed or merged into development.
+name: Deploy to Development
+
+on:
+  push:
+    branches: [development]
+  workflow_dispatch: # adds a "Run workflow" button in the Actions tab
+
+# Never run two deploys to the same site at once
+concurrency:
+  group: deploy-development
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: development # DEPLOY_USER and DEPLOY_PATH come from this environment
+
+    steps:
+      # 1. Get the code
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      # 2. Build: PHP dependencies (no dev tools) and frontend assets
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5' # match the server
+          coverage: none
+
+      - name: Install Composer dependencies
+        run: composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Build frontend assets
+        run: |
+          npm ci
+          npm run build
+
+      # 3. Connect: load the deploy key so the runner can SSH into the server
+      - name: Set up SSH
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      # 4. Ship: copy the built app to the site. Excluded paths are never
+      #    overwritten or deleted on the server (.env, database, storage).
+      - name: Ship code
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          rsync -az --delete \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='node_modules/' \
+            --exclude='tests/' \
+            --exclude='.env' \
+            --exclude='storage/' \
+            --exclude='database/database.sqlite' \
+            --exclude='public/hot' \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            ./ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/"
+
+      # 5. Post-deploy: make sure folders and the database exist, migrate, rebuild caches
+      - name: Post-deploy
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" bash -se << REMOTE
+            set -e
+            cd "$DEPLOY_PATH"
+            mkdir -p storage/app/public storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs bootstrap/cache
+            touch database/database.sqlite
+            php artisan migrate --force
+            php artisan optimize:clear
+            php artisan optimize
+          REMOTE
