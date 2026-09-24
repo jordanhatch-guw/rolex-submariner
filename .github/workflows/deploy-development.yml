@@ -15,7 +15,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: Development # DEPLOY_USER and DEPLOY_PATH come from this environment
+    environment: development # DEPLOY_USER and DEPLOY_PATH come from this environment
 
     steps:
       # 1. Get the code
